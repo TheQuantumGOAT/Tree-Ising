@@ -1,0 +1,99 @@
+# Evolving repair loop (Appendix C): candidates are scored inside one multi-slot vLLM engine and the solver is warm-started on the GPU;
+# a round takes 5-6 minutes on one A100-40GB. Needs the Qwen3.5-0.8B statistics and benchmark runs of configs/qwen35_0.8b.yaml.
+#   run_treeising --config configs/repair_loop.yaml
+vars:
+  base: models/Qwen3.5-0.8B
+  agent: models/Qwen3.5-0.8B-weight-space-programming
+  stats: results/qwen35_0.8b
+  gen: results/qwen35_0.8b/gen
+  out: results/repair
+
+experiments:
+  # ---------------------------------------------------------------- rl1: practice problems only
+  rl1:                      # 3 rounds + a bootstrap round, 128 fresh problems per round, 8k cap, candidates at 0.3x and 0.6x the agent's
+    step: repair            # dose, <= 16,384 changed weights per layer per round -> 30,444 + 33,889 = 64,333 changed weights in 20.5 min
+    start_model: "{base}"
+    out_dir: "{out}/{name}"
+    pool: [data/practice_screen512.jsonl, data/practice_collect.jsonl]
+    u_stats_path: "{stats}/stats_onset_8k.pt"     # the loop direction u stays the paper's
+    u_end_stats_path: "{stats}/stats_end.pt"
+    base_model: "{base}"
+    reference_model: "{agent}"
+    rounds: 3
+    batch: 128
+    cap: 8192
+    tscales: [0.3, 0.6]
+    budget: 16384
+    beta: 0.5
+    min_loop_tokens: 1000
+    gpu_util: 0.80
+  build_rl1:
+    step: build
+    layers_pt: "{out}/rl1/final.pt"
+    out_path: models/repair_rl1
+    base_model: "{base}"
+  compare_8k:               # one engine, 192 held-out practice problems, 8k: rl1 48, SA 36 (20 vs 8, p 0.036), SB 32 (24 vs 8, p 0.007)
+    step: compare_edits
+    slots:
+      - {name: rl1, path: models/repair_rl1}
+      - {name: sa, path: models/treeising_sa}
+      - {name: sb, path: models/treeising_sb}
+    out_dir: "{out}/eval/rl1_vs_sa_8k"
+    data: data/practice_rs.jsonl
+    n: 192
+    cap: 8192
+  benchmarks_rl1:           # 32k: MATH-500@4 54.2, MATH-500@1 53.0, GSM8K 69.6, AMC23@16 23.8, Minerva@4 27.7, OlympiadBench 23.0, screen 52.3
+    step: evaluate
+    benchmarks:
+      - {name: math500x1, data: data/math500.jsonl, n: 1, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: math500x4, data: data/math500.jsonl, n: 4, seed: 1, profile: mit, max_tokens: 32768}
+      - {name: gsm8k, data: data/gsm8k.jsonl, n: 1, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: amc23, data: data/amc23.jsonl, n: 16, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: minerva, data: data/minerva.jsonl, n: 4, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: olympiad, data: data/olympiad.jsonl, n: 1, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: screen, data: data/practice_screen.jsonl, n: 1, seed: 0, profile: mit, max_tokens: 32768}
+    models:
+      - {path: models/repair_rl1, tag: rl1}
+    out_dir: "{gen}"
+    gpu_util: 0.9
+    references: [sa, sb, agent]
+    paired_out: "{out}/rl1_benchmarks.json"
+
+  # ---------------------------------------------------------------- rl2: repair halves of MATH-500, GSM8K and OlympiadBench
+  rl2:                      # 4 rounds + bootstrap -> 33,163 + 31,662 = 64,825 changed weights in 27 min
+    from: rl1
+    pool: [data/heldout/repair_pool_rl2.jsonl]
+    rounds: 4
+  build_rl2: {from: build_rl1, layers_pt: "{out}/rl2/final.pt", out_path: models/repair_rl2}
+  eval_rl2:                 # problems no loop saw: the held-out halves, Minerva and AMC23
+    step: evaluate
+    benchmarks:
+      - {name: math500x4_held, data: data/heldout/math500_held.jsonl, n: 4, seed: 1, profile: mit, max_tokens: 32768}
+      - {name: gsm8k_held, data: data/heldout/gsm8k_held.jsonl, n: 1, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: olympiad_held, data: data/heldout/olympiad_held.jsonl, n: 1, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: minerva, data: data/minerva.jsonl, n: 4, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: amc23, data: data/amc23.jsonl, n: 16, seed: 0, profile: mit, max_tokens: 32768}
+    models:
+      - {path: models/repair_rl2, tag: rl2}
+    out_dir: "{gen}"
+    gpu_util: 0.9
+  generalization:           # rl2 / rl1 / SA / SB / agent. MATH-500 held 56.4 / 56.5 / 56.4 / 55.5 / 52.9; GSM8K held 72.4 / 68.1 / 72.7 / 68.9 / 66.2;
+    step: generalization    # Olympiad held 24.2 / 23.3 / 23.0 / 22.1 / 20.9; Minerva 27.1 / 27.7 / 26.1 / 25.6 / 24.2; AMC23 24.7 / 23.8 / 22.7 / 25.0 / 22.0
+    sets:
+      - name: MATH-500 held-out half, x4
+        ids: data/heldout/math500_held.jsonl
+        files: {rl2: "{gen}/rl2_math500x4_held.jsonl", rl1: "{gen}/rl1_math500x4.jsonl", sa: "{gen}/sa_math500x4.jsonl", sb: "{gen}/sb_math500x4.jsonl", agent: "{gen}/agent_math500x4.jsonl"}
+      - name: GSM8K held-out half, x1
+        ids: data/heldout/gsm8k_held.jsonl
+        files: {rl2: "{gen}/rl2_gsm8k_held.jsonl", rl1: "{gen}/rl1_gsm8k.jsonl", sa: "{gen}/sa_gsm8k.jsonl", sb: "{gen}/sb_gsm8k.jsonl", agent: "{gen}/agent_gsm8k.jsonl"}
+      - name: OlympiadBench held-out half, x1
+        ids: data/heldout/olympiad_held.jsonl
+        files: {rl2: "{gen}/rl2_olympiad_held.jsonl", rl1: "{gen}/rl1_olympiad.jsonl", sa: "{gen}/sa_olympiad.jsonl", sb: "{gen}/sb_olympiad.jsonl", agent: "{gen}/agent_olympiad.jsonl"}
+      - name: Minerva (no loop saw it), x4
+        ids: data/minerva.jsonl
+        files: {rl2: "{gen}/rl2_minerva.jsonl", rl1: "{gen}/rl1_minerva.jsonl", sa: "{gen}/sa_minerva.jsonl", sb: "{gen}/sb_minerva.jsonl", agent: "{gen}/agent_minerva.jsonl"}
+      - name: AMC23 (no loop saw it), x16
+        ids: data/amc23.jsonl
+        files: {rl2: "{gen}/rl2_amc23.jsonl", rl1: "{gen}/rl1_amc23.jsonl", sa: "{gen}/sa_amc23.jsonl", sb: "{gen}/sb_amc23.jsonl", agent: "{gen}/agent_amc23.jsonl"}
+    pairs: [[rl2, rl1], [rl2, sa], [rl2, sb], [rl2, agent], [rl1, sa], [rl1, sb], [rl1, agent]]
+    out_path: "{out}/generalization.json"

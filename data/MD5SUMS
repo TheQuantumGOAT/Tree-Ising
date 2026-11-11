@@ -1,0 +1,17 @@
+e5a13ecd8cd41e268ca330896ef69246  data/amc23.jsonl
+5212e8af5917837682c4efc38daa9730  data/gsm8k.jsonl
+bab731e37b61a033c7073979633d55de  data/math500.jsonl
+4f8d4ee0610eb6caa94240621cc3cf27  data/math500_sub100.jsonl
+7f2fb2631ef367805e98024d6c1609a8  data/minerva.jsonl
+2424b9fc511cf1fff9a0f055cadf11a8  data/olympiad.jsonl
+1cf0e78aef3810e2244977d57bfdb016  data/practice_collect.jsonl
+5b4fff0846c7097828153f3e40570579  data/practice_rs.jsonl
+1af3b0dce3dae24a5e5ef09e9f284dc3  data/practice_screen.jsonl
+545c690f783e6c9702c3b132375f33bb  data/practice_screen512.jsonl
+725ce2acb1713ee83269f0bf4de3987b  data/heldout/gsm8k_held.jsonl
+c27b5369ea1908ad0910755f1988705a  data/heldout/gsm8k_repair.jsonl
+f2c0e566debe8131a9b5fb81cc36258c  data/heldout/math500_held.jsonl
+d387a01331c21a40d976b75165e26792  data/heldout/math500_repair.jsonl
+b1618a1a1ea4db119e2c2e745f7589fe  data/heldout/olympiad_held.jsonl
+51fc410ca137a27ad7482a78baa5610b  data/heldout/olympiad_repair.jsonl
+3fa9a892aac26b5ef1da88a43e9616bc  data/heldout/repair_pool_rl2.jsonl

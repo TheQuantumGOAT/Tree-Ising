@@ -1,0 +1,159 @@
+# Qwen3.5-0.8B: every experiment of Sec. 4 of the paper (Tables 1, 3, 4, 5 and Fig. 3), in run order, on one A100-40GB.
+#   run_treeising --config configs/qwen35_0.8b.yaml                      # everything; finished experiments are skipped
+#   run_treeising --config configs/qwen35_0.8b.yaml --only treeising_sa  # one experiment; --list shows them all
+# Paper numbers are in the comments. Each experiment is the keyword arguments of its step's function (see TreeIsing/pipeline.py);
+# `from: X` copies experiment X and overrides the keys given.
+vars:
+  base: models/Qwen3.5-0.8B
+  agent: models/Qwen3.5-0.8B-weight-space-programming
+  out: results/qwen35_0.8b
+
+experiments:
+  # ---------------------------------------------------------------- inputs
+  models:
+    step: download
+    repos: [Qwen/Qwen3.5-0.8B, RikiyaT/Qwen3.5-0.8B-weight-space-programming]
+    revisions:
+      Qwen/Qwen3.5-0.8B: 2fc06364715b967f1860aea9cf38778875588b17
+      RikiyaT/Qwen3.5-0.8B-weight-space-programming: d1671a178705bcab7644806d23c535517f35723b
+  data:                     # benchmarks from Hugging Face; practice sets from the agent's released practice problems
+    step: data
+    practice_dir: external/lm_understand-logs/exp8_math/practice
+    practice_revision: 4d09ba6d6a7e891dd8063974dfe81b3d78e3494f
+    dataset_revisions:
+      math500: 6e4ed1a2a79af7d8630a6b768ec859cb5af4d3be
+      gsm8k: 740312add88f781978c0658806c59bc2815b9866
+      amc23: 80815d37005feb82cd7f8fbc6901d5d3eff43057
+      minerva: ee46ddc498933b1977577953250ca5c66be64f96
+      olympiad: 4faaf1e6ec17d11a4218a9bf4c049ecaf954dd84
+  splits:                   # repair / held-out halves of MATH-500, GSM8K, OlympiadBench for the repair loop
+    step: splits
+  check_data:
+    step: md5
+    md5sums: data/MD5SUMS
+
+  # ---------------------------------------------------------------- calibration
+  practice_answers:         # the base model on the 384 practice problems, agent protocol, 8k cap
+    step: generate
+    model_path: "{base}"
+    data_path: data/practice_collect.jsonl
+    out_path: "{out}/gen/base_practice_mit_8k.jsonl"
+    n: 1
+    max_tokens: 8192
+    profile: mit            # temperature 0.6, top-p 0.95, top-k 20, presence penalty 1.5, thinking on
+  statistics:               # 224 looping, 33 correct traces; |R| 195,013, |P| 567,053, |Z| 2,112, |M| 120,068 tokens per layer
+    step: statistics
+    model_path: "{base}"
+    gen_path: "{out}/gen/base_practice_mit_8k.jsonl"
+    problems_path: data/practice_collect.jsonl
+    stats_path: "{out}/stats_onset_8k.pt"
+    end_stats_path: "{out}/stats_end.pt"
+    layers: [15, 19]
+  layer_scan:               # Fig. 3 top: top write layers 23, 19, 15, 21 -> selected 15, 19; gradient support 14, 21, 18, 16
+    step: scan
+    model_path: "{base}"
+    gen_path: "{out}/gen/base_practice_mit_8k.jsonl"
+    problems_path: data/practice_collect.jsonl
+    out_path: "{out}/scan_qwen35.json"
+    grad: true
+
+  # ---------------------------------------------------------------- the edit (Table 1)
+  treeising_sa:             # 51,754 + 60,876 = 112,630 changed weights; doses -2.225 / -3.075 (targets -2.183 / -3.056)
+    step: edit
+    model_path: "{base}"
+    stats_path: "{out}/stats_onset_8k.pt"
+    end_stats_path: "{out}/stats_end.pt"
+    out_path: "models/{name}"
+    report_path: "{out}/edits/{name}.json"
+    layers: [15, 19]
+    dose_rule: reference    # [reference|own_write] reference: dose_scale x the agent edit's dose along u
+    reference_model: "{agent}"
+    dose_scale: 1.6
+    K: 512                  # candidate columns per output row
+    beta: 0.5               # weight of the conclude direction in u
+    mu: 2.0                 # sparsity weight, relative to the median single-move collateral; doubled while over budget
+    budget: 65536           # changed weights per layer
+    moves: ext              # [ext|basic] ext = {-1, 2, 1/2, 4, -2, -4, -1/2, 1/4}, basic = {-1, 2, 1/2}
+    solver: sa              # [sa|sb] simulated annealing or simulated bifurcation
+    greedy: false
+    seed: 0
+  treeising_sb: {from: treeising_sa, solver: sb}      # 48,860 + 59,467 = 108,327 changed weights
+
+  # ---------------------------------------------------------------- ablations (Table 5), one change each
+  abl_beta0: {from: treeising_sa, beta: 0.0, end_stats_path: null}
+  abl_beta025: {from: treeising_sa, beta: 0.25}
+  abl_beta1: {from: treeising_sa, beta: 1.0}
+  abl_dose12: {from: treeising_sa, dose_scale: 1.2}
+  abl_dose20: {from: treeising_sa, dose_scale: 2.0}
+  abl_basic_moves: {from: treeising_sa, moves: basic}
+  abl_greedy: {from: treeising_sa, greedy: true}
+  abl_budget28k: {from: treeising_sa, budget: 28000}
+
+  # ---------------------------------------------------------------- continuous edits: same u and per-layer dose as treeising_sa
+  bl_cont_opt:              # closed-form rank one, (C_P + 1e-3 mean-diag I)^-1 mu_R
+    step: continuous
+    model_path: "{base}"
+    stats_path: "{out}/stats_onset_8k.pt"
+    end_stats_path: "{out}/stats_end.pt"
+    reference_report: "{out}/edits/treeising_sa.json"
+    mode: cont_opt
+    eps: 0.001
+    out_path: "models/{name}"
+    report_path: "{out}/edits/{name}.json"
+  bl_cont_ridge: {from: bl_cont_opt, eps: 0.1}          # stronger ridge
+  bl_cont_abl: {from: bl_cont_opt, mode: cont_abl}      # directional ablation -alpha u u^T W
+
+  # ---------------------------------------------------------------- evaluation
+  screen:                   # Table 5: 128 held-out practice problems, 32k. SA 57.0, beta 0 43.8, basic moves 50.0, 28k 49.2, agent 52.3
+    step: evaluate
+    benchmarks:
+      - {name: screen, data: data/practice_screen.jsonl, n: 1, profile: mit, max_tokens: 32768}
+    models:
+      - {path: models/treeising_sa, tag: sa}
+      - {path: models/treeising_sb, tag: sb}
+      - {path: "{agent}", tag: agent}
+      - {path: models/abl_beta0, tag: abl_beta0}
+      - {path: models/abl_beta025, tag: abl_beta025}
+      - {path: models/abl_beta1, tag: abl_beta1}
+      - {path: models/abl_dose12, tag: abl_dose12}
+      - {path: models/abl_dose20, tag: abl_dose20}
+      - {path: models/abl_basic_moves, tag: abl_basic_moves}
+      - {path: models/abl_greedy, tag: abl_greedy}
+      - {path: models/abl_budget28k, tag: abl_budget28k}
+      - {path: models/bl_cont_opt, tag: bl_cont_opt}
+      - {path: models/bl_cont_ridge, tag: bl_cont_ridge}
+      - {path: models/bl_cont_abl, tag: bl_cont_abl}
+    out_dir: "{out}/gen"
+    gpu_util: 0.9
+    references: [sa]
+    paired_out: "{out}/screen.json"
+  benchmarks:               # Table 1 / 3, agent protocol, 32k. MATH-500@4: agent 51.7, SA 54.6, SB 55.1 (@k = completions per problem)
+    step: evaluate
+    benchmarks:
+      - {name: math500x1, data: data/math500.jsonl, n: 1, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: math500x4, data: data/math500.jsonl, n: 4, seed: 1, profile: mit, max_tokens: 32768}
+      - {name: gsm8k, data: data/gsm8k.jsonl, n: 1, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: amc23, data: data/amc23.jsonl, n: 16, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: minerva, data: data/minerva.jsonl, n: 4, seed: 0, profile: mit, max_tokens: 32768}
+      - {name: olympiad, data: data/olympiad.jsonl, n: 1, seed: 0, profile: mit, max_tokens: 32768}
+    models:
+      - {path: "{agent}", tag: agent}
+      - {path: models/treeising_sa, tag: sa}
+      - {path: models/treeising_sb, tag: sb}
+    out_dir: "{out}/gen"
+    gpu_util: 0.9
+    references: [agent, sa]
+    paired_out: "{out}/benchmarks.json"
+  heldout400:               # MATH-500@4 without the 100 development problems: SA vs agent +2.94 (p 0.009), SB vs agent +2.81 (p 0.007)
+    step: paired
+    comparisons:
+      - {name: sa_vs_agent_all500, a: "{out}/gen/sa_math500x4.jsonl", b: "{out}/gen/agent_math500x4.jsonl"}
+      - {name: sa_vs_agent_heldout400, a: "{out}/gen/sa_math500x4.jsonl", b: "{out}/gen/agent_math500x4.jsonl", exclude: data/math500_sub100.jsonl}
+      - {name: sb_vs_agent_heldout400, a: "{out}/gen/sb_math500x4.jsonl", b: "{out}/gen/agent_math500x4.jsonl", exclude: data/math500_sub100.jsonl}
+      - {name: sb_vs_sa_heldout400, a: "{out}/gen/sb_math500x4.jsonl", b: "{out}/gen/sa_math500x4.jsonl", exclude: data/math500_sub100.jsonl}
+    out_path: "{out}/heldout400.json"
+  footprint:                # Table 4 (changed / BF16 bits / tree bits / sign / state_D / node / mantissa):
+    step: footprint         # agent 130,188 / 621,388 / 720,586 / 19,299 / 146,981 / 1,261 / 129,668; SA 112,630 / 278,767 / 181,062 / 57,704 / 99,952 / 0 / 0
+    base_model: "{base}"
+    edited_models: ["{agent}", models/treeising_sa, models/treeising_sb, models/bl_cont_opt, models/bl_cont_ridge, models/bl_cont_abl]
+    out_path: "{out}/footprint.json"

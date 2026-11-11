@@ -1,0 +1,6 @@
+include README.md
+recursive-include configs *.yaml
+include data/README.md
+include data/MD5SUMS
+
+include requirements-reproduce.txt

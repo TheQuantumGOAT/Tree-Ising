@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+.DS_Store
+.env
+.env.*
+
+# Downloaded checkpoints, external practice sources, and generated experiment artifacts.
+/models/
+/results/
+/external/
+/data/*.jsonl
+/data/heldout/
+*.pt
+*.safetensors
+/data/raw/

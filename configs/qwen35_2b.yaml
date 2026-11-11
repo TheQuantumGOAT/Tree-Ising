@@ -1,0 +1,115 @@
+# Qwen3.5-2B transfer (Sec. 5, Table 6, Fig. 4): the unchanged recipe on a new model, greedy decoding, 8k cap.
+#   run_treeising --config configs/qwen35_2b.yaml
+# Uses data/ from configs/qwen35_0.8b.yaml (experiments data, check_data).
+vars:
+  base: models/Qwen3.5-2B
+  out: results/qwen35_2b
+
+experiments:
+  models:
+    step: download
+    repos: [Qwen/Qwen3.5-2B]
+    revisions:
+      Qwen/Qwen3.5-2B: 15852e8c16360a2fea060d615a32b45270f8a8fc
+  probe:                    # decoding probe, first 200 GSM8K test problems: 21.0% correct, 79% cut (excluded in paired_outside_probe)
+    step: generate
+    model_path: "{base}"
+    data_path: data/gsm8k.jsonl
+    out_path: "{out}/gen/probe_gsm8k200_greedy.jsonl"
+    n: 1
+    limit: 200
+    max_tokens: 8192
+    profile: greedy
+    gpu_util: 0.85
+
+  # ---------------------------------------------------------------- calibration
+  practice_answers:         # the same 384 practice problems: 16.9% correct, 83.1% cut
+    from: probe
+    data_path: data/practice_collect.jsonl
+    out_path: "{out}/gen/practice_greedy_8k.jsonl"
+    limit: 0
+  layer_scan:               # Fig. 3 bottom: top write layers 23, 19, 15, 14 -> final layer excluded -> 15, 19
+    step: scan
+    model_path: "{base}"
+    gen_path: "{out}/gen/practice_greedy_8k.jsonl"
+    problems_path: data/practice_collect.jsonl
+    out_path: "{out}/scan_q2b_greedy.json"
+  statistics:               # 275 looping and 65 correct traces, |R| 246k, |P| 655k tokens
+    step: statistics
+    model_path: "{base}"
+    gen_path: "{out}/gen/practice_greedy_8k.jsonl"
+    problems_path: data/practice_collect.jsonl
+    stats_path: "{out}/stats_onset_q2b.pt"
+    end_stats_path: "{out}/stats_end_q2b.pt"
+    layers: [15, 19]
+  statistics_3layers: {from: statistics, layers: [14, 15, 19], stats_path: "{out}/stats_onset_q2b3.pt", end_stats_path: "{out}/stats_end_q2b3.pt"}
+
+  # ---------------------------------------------------------------- edits
+  q2b_recipe:               # Table 6: scan layers, dose 6.5x own write, <= 200,000 weights per layer -> 292,845 changed weights
+    step: edit
+    model_path: "{base}"
+    stats_path: "{out}/stats_onset_q2b.pt"
+    end_stats_path: "{out}/stats_end_q2b.pt"
+    out_path: "models/{name}"
+    report_path: "{out}/edits/{name}.json"
+    layers: [15, 19]
+    dose_rule: own_write    # target = -dose_mult x |u^T W mu_R| (no reference edit)
+    dose_mult: 6.5
+    K: 512
+    beta: 0.5
+    mu: 2.0
+    budget: 200000
+    moves: ext
+    solver: sa
+    seed: 0
+  q2b_m4: {from: q2b_recipe, dose_mult: 4}                       # dose sweep (Fig. 4, right)
+  q2b_m9: {from: q2b_recipe, dose_mult: 9, budget: 300000}
+  q2b_m12: {from: q2b_recipe, dose_mult: 12, budget: 300000}
+  q2b3_m65:                 # next scan layer added: layers 14, 15, 19
+    from: q2b_recipe
+    stats_path: "{out}/stats_onset_q2b3.pt"
+    end_stats_path: "{out}/stats_end_q2b3.pt"
+    layers: [14, 15, 19]
+    budget: 300000
+  q2b3_m9: {from: q2b3_m65, dose_mult: 9}                        # Table 6 stronger dose: 482,423 changed weights
+
+  # ---------------------------------------------------------------- evaluation
+  screen:                   # dose sweep on the practice screen (Fig. 4, right)
+    step: evaluate
+    benchmarks:
+      - {name: screen, data: data/practice_screen.jsonl, n: 1, profile: greedy, max_tokens: 8192, gpu_util: 0.85}
+    models:
+      - {path: "{base}", tag: q2b_base}
+      - {path: models/q2b_m4, tag: q2b_m4}
+      - {path: models/q2b_recipe, tag: q2b_recipe}
+      - {path: models/q2b_m9, tag: q2b_m9}
+      - {path: models/q2b_m12, tag: q2b_m12}
+      - {path: models/q2b3_m65, tag: q2b3_m65}
+      - {path: models/q2b3_m9, tag: q2b3_m9}
+    out_dir: "{out}/gen"
+    references: [q2b_base]
+    paired_out: "{out}/screen.json"
+  gsm8k:                    # Table 6, all 1,319 GSM8K test problems: base 21.6, recipe 69.4, stronger dose 71.8
+    step: evaluate
+    benchmarks:
+      - {name: gsm8k_greedy, data: data/gsm8k.jsonl, n: 1, profile: greedy, max_tokens: 8192, gpu_util: 0.85}
+    models:
+      - {path: "{base}", tag: q2b_base}
+      - {path: models/q2b_recipe, tag: q2b_recipe}
+      - {path: models/q2b3_m9, tag: q2b3_m9}
+    out_dir: "{out}/gen"
+    references: [q2b_base, q2b_recipe]
+    paired_out: "{out}/gsm8k.json"
+  paired:                   # only edit / only base / both: recipe 669 / 38 / 247; outside the probe 571 / 34 / 208; stronger vs recipe 171 / 140 (p 0.09)
+    step: paired
+    comparisons:
+      - {name: recipe_vs_base, a: "{out}/gen/q2b_recipe_gsm8k_greedy.jsonl", b: "{out}/gen/q2b_base_gsm8k_greedy.jsonl"}
+      - {name: recipe_vs_base_outside_probe, a: "{out}/gen/q2b_recipe_gsm8k_greedy.jsonl", b: "{out}/gen/q2b_base_gsm8k_greedy.jsonl", exclude: "{out}/gen/probe_gsm8k200_greedy.jsonl"}
+      - {name: strong_vs_base, a: "{out}/gen/q2b3_m9_gsm8k_greedy.jsonl", b: "{out}/gen/q2b_base_gsm8k_greedy.jsonl"}
+      - {name: strong_vs_recipe, a: "{out}/gen/q2b3_m9_gsm8k_greedy.jsonl", b: "{out}/gen/q2b_recipe_gsm8k_greedy.jsonl"}
+    out_path: "{out}/paired.json"
+  footprint:                # recipe 292,845 changed weights, 718,546 BF16 bits, 473,524 tree bits; stronger 482,423 / 1,178,678 / 788,492
+    step: footprint
+    base_model: "{base}"
+    edited_models: [models/q2b_recipe, models/q2b3_m9]
+    out_path: "{out}/footprint.json"
